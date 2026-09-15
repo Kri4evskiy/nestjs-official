@@ -15,7 +15,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
       password: 'pass123',
       database: 'postgres', // name of our database,
       autoLoadEntities: true, // models will be loaded automatically
-      synchronize: true, // your entities will be synced with the database(recommended: disable in prod)
+      synchronize: false, // your entities will be synced with the database(recommended: disable in prod) (and also in dev)
     }),
   ],
   controllers: [AppController],
