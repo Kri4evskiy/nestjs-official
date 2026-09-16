@@ -10,15 +10,6 @@ import { Event } from 'src/events/entities/event.entity';
 
 @Injectable()
 export class CoffeesService {
-  // private coffees: Coffee[] = [
-  //   {
-  //     id: 1,
-  //     name: 'Latte',
-  //     brand: 'Starbucks',
-  //     flavors: ['chocolate', 'vanilla'],
-  //   },
-  // ];
-
   constructor(
     @InjectRepository(Coffee)
     private readonly coffeeRepository: Repository<Coffee>,
