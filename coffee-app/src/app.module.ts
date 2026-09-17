@@ -24,7 +24,6 @@ import appConfig from './config/app.config';
         DATABASE_NAME: Joi.string().required(),
       }),
     }),
-    CoffeesModule,
     TypeOrmModule.forRootAsync({
       // imports: [ConfigModule], // 👈 if config is not global
       inject: [appConfig.KEY],
@@ -39,9 +38,16 @@ import appConfig from './config/app.config';
         synchronize: false,
       }),
     }),
+    CoffeesModule,
     CoffeeRatingModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // {
+    //   provide: APP_PIPE,
+    //   useClass: ValidationPipe,
+    // },
+  ],
 })
 export class AppModule {}
