@@ -48,6 +48,10 @@ import appConfig from './config/app.config';
     //   provide: APP_PIPE,
     //   useClass: ValidationPipe,
     // },
+    // {
+    //   provide: APP_GUARD,
+    //   useClass: ApiKeyGuard,
+    // },
   ],
 })
 export class AppModule {}
