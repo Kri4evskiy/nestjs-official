@@ -1,17 +1,21 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigType } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import * as Joi from 'joi';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { CoffeesModule } from './coffees/coffees.module';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { CoffeeRatingModule } from './coffee-rating/coffee-rating.module';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import * as Joi from 'joi';
+import { CoffeesModule } from './coffees/coffees.module';
+import appConfig from './config/app.config';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       // envFilePath: '.environment',
       // ignoreEnvFile: true,
+      load: [appConfig],
+      isGlobal: true,
+
       validationSchema: Joi.object({
         DATABASE_HOST: Joi.string().required(),
         DATABASE_PORT: Joi.number().default(5432),
@@ -22,15 +26,15 @@ import * as Joi from 'joi';
     }),
     CoffeesModule,
     TypeOrmModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
+      // imports: [ConfigModule], // 👈 if config is not global
+      inject: [appConfig.KEY],
+      useFactory: (appConfiguration: ConfigType<typeof appConfig>) => ({
         type: 'postgres',
-        host: configService.get<string>('DATABASE_HOST'),
-        port: configService.get<number>('DATABASE_PORT'),
-        username: configService.get<string>('DATABASE_USER'),
-        password: configService.get<string>('DATABASE_PASSWORD'),
-        database: configService.get<string>('DATABASE_NAME'),
+        host: appConfiguration.database.host,
+        port: appConfiguration.database.port,
+        username: appConfiguration.database.username,
+        password: appConfiguration.database.password,
+        database: appConfiguration.database.name,
         autoLoadEntities: true,
         synchronize: false,
       }),
