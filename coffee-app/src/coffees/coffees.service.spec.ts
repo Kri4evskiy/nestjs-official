@@ -13,8 +13,12 @@ type MockRepository<T extends ObjectLiteral = any> = Partial<
 const createMockRepository = <
   T extends ObjectLiteral = any,
 >(): MockRepository<T> => ({
+  find: jest.fn(),
   findOne: jest.fn(),
   create: jest.fn(),
+  save: jest.fn(),
+  preload: jest.fn(),
+  remove: jest.fn(),
 });
 
 describe('CoffeesService', () => {
