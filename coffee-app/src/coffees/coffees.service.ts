@@ -13,11 +13,11 @@ import coffeesConfig from './config/coffees.config';
 @Injectable()
 export class CoffeesService {
   constructor(
+    private readonly dataSource: DataSource,
     @InjectRepository(Coffee)
     private readonly coffeeRepository: Repository<Coffee>,
     @InjectRepository(Flavor)
     private readonly flavorRepository: Repository<Flavor>,
-    private readonly dataSource: DataSource,
     @Inject(coffeesConfig.KEY)
     private coffeesConfiguration: config.ConfigType<typeof coffeesConfig>,
   ) {
