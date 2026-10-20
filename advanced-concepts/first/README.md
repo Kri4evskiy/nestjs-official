@@ -83,3 +83,58 @@ export class CoffeesService {
 - **Single Export per File:** Try to maintain one main export per file (e.g. only the service class or only the module class).
 - **Dedicated Constants Files:** Move tokens, symbols, and shared configuration out of services and modules into separate files like `coffees.constants.ts`.
 - **Linter Enforcements:** In projects with ESLint, enable rule `import/no-cycle` to catch circular imports at compile/lint time.
+
+---
+
+## Lesson: Lazy Loading Modules
+
+Lazy loading allows deferring the compilation and instantiation of modules/providers until they are explicitly needed (e.g. in Serverless / AWS Lambda to decrease cold start times, or for rarely triggered operations).
+
+### Implementation Reference
+
+Implementation can be found in [`src/coffees/coffees.service.ts`](/src/coffees/coffees.service.ts) within the `create()` method:
+
+```typescript
+@Injectable()
+export class CoffeesService {
+  constructor(
+    @Inject(COFFEES_DATA_SOURCE) dataSource: CoffeesDataSource,
+    private readonly lazyModuleLoader: LazyModuleLoader, // 👈 Injected from '@nestjs/core'
+  ) {}
+
+  async create(createCoffeeDto: CreateCoffeeDto) {
+    console.time();
+    // 1. Dynamically load RewardsModule on-demand
+    const rewardsModuleRef = await this.lazyModuleLoader.load(() =>
+      import('../rewards/rewards.module.js').then((m) => m.RewardsModule),
+    );
+
+    // 2. Dynamically import RewardsService and obtain instance from loaded moduleRef
+    const { RewardsService } = await import('../rewards/rewards.service.js');
+    const rewardsService = rewardsModuleRef.get(RewardsService);
+    console.timeEnd();
+
+    // 3. Execute method from lazy service
+    rewardsService.grantTo();
+    return 'This action adds a new coffee';
+  }
+  // ...
+}
+```
+
+### Key Differences from Eager Loading:
+- `RewardsModule` is **NOT** included in `imports: [...]` in `CoffeesModule`.
+- `RewardsService` is **NOT** statically injected into the `constructor`.
+- The module is loaded and cached on first call; subsequent calls retrieve the cached reference with near-zero latency.
+
+### Testing the Lazy-Loaded Endpoint
+
+- **Windows PowerShell (using `curl.exe`):**
+  ```powershell
+  curl.exe -H "content-type: application/json" http://localhost:3000/coffees -d "{}"
+  ```
+
+- **Native PowerShell command (`Invoke-RestMethod`):**
+  ```powershell
+  Invoke-RestMethod -Uri http://localhost:3000/coffees -Method Post -ContentType "application/json" -Body "{}"
+  ```
