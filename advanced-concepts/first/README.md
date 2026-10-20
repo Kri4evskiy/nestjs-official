@@ -138,3 +138,73 @@ export class CoffeesService {
   ```powershell
   Invoke-RestMethod -Uri http://localhost:3000/coffees -Method Post -ContentType "application/json" -Body "{}"
   ```
+
+---
+
+## Lesson: Accessing IoC Container & Discovery Pattern (Custom Scheduler)
+
+This lesson demonstrates how to inspect and introspect the NestJS IoC container dynamically using `@nestjs/core` utilities (`DiscoveryService`, `Reflector`, `MetadataScanner`). We implemented a custom interval scheduler (similar to `@nestjs/schedule`).
+
+### How It Works:
+1. **Metadata Decorators:**
+   - [`@IntervalHost`](/src/scheduler/decorators/interval-host.decorator.ts): Marks a class as a host containing periodic tasks.
+   - [`@Interval(ms)`](/src/scheduler/decorators/interval.decorator.ts): Marks a method with a timer interval in milliseconds.
+2. **Container Discovery & Lifecycle (`IntervalScheduler`):**
+   - Implements `OnApplicationBootstrap` to scan providers after the application boots.
+   - Uses `DiscoveryService.getProviders()` to traverse all instantiated classes in the container.
+   - Uses `Reflector` to check for classes decorated with `@IntervalHost`.
+   - Uses `MetadataScanner.getAllMethodNames()` to find methods decorated with `@Interval(ms)`.
+   - Schedules tasks with `setInterval()`.
+   - Implements `OnApplicationShutdown` to safely clean up all active intervals (`clearInterval`).
+
+### Code Example:
+
+#### Host Service ([`src/cron/cron.service.ts`](/src/cron/cron.service.ts)):
+```typescript
+@IntervalHost
+export class CronService {
+  @Interval(2000)
+  everyTwoSeconds() {
+    console.log('This will be logged every 2 seconds 🐈 ');
+  }
+}
+```
+
+#### Scheduler Service ([`src/scheduler/interval.scheduler/interval.scheduler.ts`](/src/scheduler/interval.scheduler/interval.scheduler.ts)):
+```typescript
+@Injectable()
+export class IntervalScheduler implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly intervals: NodeJS.Timeout[] = [];
+
+  constructor(
+    private readonly discoverService: DiscoveryService,
+    private readonly reflector: Reflector,
+    private readonly metadataScanner: MetadataScanner,
+  ) {}
+
+  onApplicationBootstrap() {
+    const providers = this.discoverService.getProviders();
+    providers.forEach((provider) => {
+      const { instance } = provider;
+      const prototype = instance && Object.getPrototypeOf(instance);
+      if (!prototype || !instance) return;
+
+      const isIntervalHost = this.reflector.get(INTERVAL_HOST_KEY, instance.constructor) ?? false;
+      if (!isIntervalHost) return;
+
+      const methodKeys = this.metadataScanner.getAllMethodNames(prototype);
+      methodKeys.forEach((methodKey) => {
+        const interval = this.reflector.get(INTERVAL_KEY, instance[methodKey]);
+        if (interval === undefined) return;
+
+        const intervalRef = setInterval(() => instance[methodKey](), interval);
+        this.intervals.push(intervalRef);
+      });
+    });
+  }
+
+  onApplicationShutdown() {
+    this.intervals.forEach((intervalRef) => clearInterval(intervalRef));
+  }
+}
+```
