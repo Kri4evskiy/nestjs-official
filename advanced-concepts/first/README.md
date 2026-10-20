@@ -146,6 +146,11 @@ export class CoffeesService {
 This lesson demonstrates how to inspect and introspect the NestJS IoC container dynamically using `@nestjs/core` utilities (`DiscoveryService`, `Reflector`, `MetadataScanner`). We implemented a custom interval scheduler (similar to `@nestjs/schedule`).
 
 ### How It Works:
+- **`DiscoveryService`**: Scans and discovers provider instances from the IoC container.
+- **`Reflector`**: Reads metadata decorators (`@IntervalHost`, `@Interval`).
+- **`MetadataScanner`**: Iterates through all prototype method names of a class.
+- **`OnApplicationBootstrap` & `OnApplicationShutdown`**: Manage timer lifecycles to start tasks on boot and prevent memory leaks on shutdown.
+
 1. **Metadata Decorators:**
    - [`@IntervalHost`](/src/scheduler/decorators/interval-host.decorator.ts): Marks a class as a host containing periodic tasks.
    - [`@Interval(ms)`](/src/scheduler/decorators/interval.decorator.ts): Marks a method with a timer interval in milliseconds.
