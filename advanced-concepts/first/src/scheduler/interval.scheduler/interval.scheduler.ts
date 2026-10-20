@@ -1,10 +1,16 @@
-import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Injectable,
+  OnApplicationBootstrap,
+  OnApplicationShutdown,
+} from '@nestjs/common';
 import { DiscoveryService, MetadataScanner, Reflector } from '@nestjs/core';
 import { INTERVAL_HOST_KEY } from '../decorators/interval-host.decorator.js';
 import { INTERVAL_KEY } from '../decorators/interval.decorator.js';
 
 @Injectable()
-export class IntervalScheduler implements OnApplicationBootstrap {
+export class IntervalScheduler
+  implements OnApplicationBootstrap, OnApplicationShutdown
+{
   private readonly intervals: NodeJS.Timeout[] = [];
 
   constructor(
