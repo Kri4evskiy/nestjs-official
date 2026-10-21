@@ -333,3 +333,131 @@ export class FibonacciController {
 | **Infrequent / One-off CPU task** (e.g. monthly ledger report, batch data migration) | **Native `new Worker()`** | Threads are spun up on-demand and destroyed with `worker.terminate()`, releasing OS memory immediately without keeping idle threads alive. |
 | **High-throughput API with short CPU tasks** (e.g. image resizing, hashing, parsing JSON/XML) | **Thread Pool (`Piscina`)** | Reuses a fixed pool of worker threads matched to CPU core count. Eliminates the ~50ms and 30-50MB overhead of spawning a thread per request. |
 | **Long-running background jobs** (minutes to hours: video encoding, massive web scraping) | **Job Queues (BullMQ / Redis)** | Heavy multi-minute jobs should NOT run inside the web server process at all. Dedicated queue workers isolate crashes, allow automatic retries, and distribute workloads across server clusters. |
+
+---
+
+## Lesson: Implementing the Circuit Breaker Pattern & Resilience Strategies
+
+In distributed systems, remote service calls can fail due to network hiccups, high latency, or total downtime. When a remote supplier is unresponsive, callers sending repeated requests can exhaust critical resources (sockets, memory, worker threads), causing cascading failures across multiple systems (the **snowball effect**).
+
+The **Circuit Breaker** acts like an electrical circuit breaker in a home: if faults exceed a safety threshold, it "trips" and immediately stops outgoing requests, returning a fast cached error instead of overwhelming the failing dependency.
+
+---
+
+### Circuit Breaker States:
+
+```
+  ┌─────────────────┐
+  │  CLOSED (Normal)│ ◄────────── Successful operation (reset failureCount)
+  └────────┬────────┘
+           │ failures >= FAILURE_THRESHOLD (3)
+           ▼
+  ┌─────────────────┐
+  │   OPEN (Tripped)│ ── Fast-fails all requests immediately without hitting handler
+  └────────┬────────┘
+           │ wait OPEN_TO_HALF_OPEN_WAIT_TIME (1 min)
+           ▼
+  ┌─────────────────┐
+  │    HALF-OPEN    │ ─── failures > 0 ──────────────► Returns to OPEN
+  └────────┬────────┘
+           │ successes >= SUCCESS_THRESHOLD (3)
+           ▼
+       (Back to CLOSED)
+```
+
+---
+
+### Implementation:
+
+#### 1. Core State Machine ([`src/common/interceptors/circuit-breaker/circuit-breaker.ts`](/src/common/interceptors/circuit-breaker/circuit-breaker.ts)):
+```typescript
+export class CircuitBreaker {
+  private state = CircuitBreakerState.Closed;
+  private failureCount = 0;
+  private successCount = 0;
+  private lastError: Error;
+  private nextAttempt: number;
+
+  exec(next: CallHandler) {
+    if (this.state === CircuitBreakerState.Open) {
+      if (this.nextAttempt > Date.now()) {
+        return throwError(() => this.lastError); // Fast-fail
+      }
+      this.state = CircuitBreakerState.HalfOpen;
+    }
+    return next.handle().pipe(
+      tap({
+        next: () => this.handleSuccess(),
+        error: (err) => this.handleError(err),
+      }),
+    );
+  }
+  // ...
+}
+```
+
+#### 2. Interceptor with Isolated State per Handler ([`src/common/interceptors/circuit-breaker/circuit-breaker.interceptor.ts`](/src/common/interceptors/circuit-breaker/circuit-breaker.interceptor.ts)):
+Using `WeakMap<Function, CircuitBreaker>` ensures each route method maintains its own isolated circuit breaker state:
+```typescript
+@Injectable()
+export class CircuitBreakerInterceptor implements NestInterceptor {
+  private readonly circuitBreakerByHandler = new WeakMap<Function, CircuitBreaker>();
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const methodRef = context.getHandler();
+
+    let circuitBreaker: CircuitBreaker;
+    if (this.circuitBreakerByHandler.has(methodRef)) {
+      circuitBreaker = this.circuitBreakerByHandler.get(methodRef)!;
+    } else {
+      circuitBreaker = new CircuitBreaker();
+      this.circuitBreakerByHandler.set(methodRef, circuitBreaker);
+    }
+    return circuitBreaker.exec(next);
+  }
+}
+```
+
+#### 3. Global Registration via `APP_INTERCEPTOR` ([`src/app.module.ts`](/src/app.module.ts)):
+Registered globally via DI token so all application endpoints are automatically protected and E2E tests inherit the interceptor seamlessly:
+```typescript
+@Module({
+  providers: [
+    AppService,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: CircuitBreakerInterceptor,
+    },
+  ],
+})
+export class AppModule {}
+```
+
+---
+
+### Testing Circuit Breaker
+
+Simulating 50 rapid requests against a failing endpoint:
+- **Windows PowerShell:**
+  ```powershell
+  1..50 | ForEach-Object { curl.exe -s -w "`n" "http://localhost:3000/coffees" }
+  ```
+- **Bash (Linux/macOS):**
+  ```bash
+  for i in `seq 1 50`; do curl -w "\n" "http://localhost:3000/coffees"; done
+  ```
+
+**Observed Result:**  
+Only the first 3 requests execute `findAll()` (reaching `FAILURE_THRESHOLD = 3`). The remaining 47 requests are instantly rejected by the circuit breaker in `Open` state without invoking the controller method.
+
+---
+
+### Alternative Resilience Strategies
+
+| Strategy | Description | Typical Use Case |
+| :--- | :--- | :--- |
+| **Retry Pattern with Exponential Backoff & Jitter** | Retries failed calls with exponentially increasing delays plus random noise (jitter) to prevent thundering herds. | Transient glitches (momentary network drops, DB connection resets). |
+| **Fallback (Graceful Degradation)** | Returns a cached response, default placeholder, or read-only replica when primary service fails. | Read-heavy public features (recommendations, banners, exchange rates). |
+| **Rate Limiting / Throttling** | Caps the maximum number of requests a client can make in a given timeframe (e.g. `@nestjs/throttler`). | Protecting endpoints from brute-force, scraping, or client-side retry floods. |
+| **Bulkhead Pattern** | Partitions critical resources (thread pools, DB connection pools) into isolated compartments. | Ensuring a failure in an auxiliary feature (like PDF rendering) cannot exhaust DB connections needed for checkout. |
+| **Strict Timeouts** | Aborts outgoing HTTP or DB operations that exceed a defined threshold (e.g. 2–5 seconds). | Preventing hanging sockets from exhausting Node.js memory. |
