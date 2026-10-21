@@ -134,11 +134,6 @@ export class CoffeesService {
   curl.exe -H "content-type: application/json" http://localhost:3000/coffees -d "{}"
   ```
 
-- **Native PowerShell command (`Invoke-RestMethod`):**
-  ```powershell
-  Invoke-RestMethod -Uri http://localhost:3000/coffees -Method Post -ContentType "application/json" -Body "{}"
-  ```
-
 ---
 
 ## Lesson: Accessing IoC Container & Discovery Pattern (Custom Scheduler)
@@ -213,3 +208,128 @@ export class IntervalScheduler implements OnApplicationBootstrap, OnApplicationS
   }
 }
 ```
+
+---
+
+## Lesson: Worker Threads & Thread Pooling (Piscina)
+
+Node.js runs on a single-threaded Event Loop, making it highly efficient for I/O operations (database, network), but vulnerable to **CPU-intensive operations** (complex calculations, PDF generation, image processing) that block the entire Event Loop for all incoming requests.
+
+**Worker Threads** allow executing heavy CPU tasks on separate OS-level threads across multiple CPU cores without blocking NestJS.
+
+---
+
+### Approach 1: Native Node.js `worker_threads` + RxJS
+
+Uses native `Worker` from `node:worker_threads` and coordinates messaging via RxJS `Observable` with request-response correlation IDs.
+
+#### 1. Worker Script ([`src/fibonacci/fibonacci.worker.ts`](/src/fibonacci/fibonacci.worker.ts)):
+```typescript
+import { parentPort } from 'worker_threads';
+
+function fib(n: number): number {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+// Listen for tasks from the main thread
+parentPort!.on('message', ({ n, id }: { n: number; id: string }) => {
+  const result = fib(n);
+  // Send calculation back with the correlation ID
+  parentPort!.postMessage({ result, id });
+});
+```
+
+#### 2. Worker Host Service ([`src/fibonacci/fibonacci-worker.host.ts`](/src/fibonacci/fibonacci-worker.host.ts)):
+```typescript
+@Injectable()
+export class FibonacciWorkerHost
+  implements OnApplicationBootstrap, OnApplicationShutdown
+{
+  private worker: Worker;
+  private message$: Observable<{ id: string; result: number }>;
+
+  onApplicationBootstrap() {
+    this.worker = new Worker(join(import.meta.dirname, 'fibonacci.worker.js'));
+    this.message$ = fromEvent(this.worker, 'message') as Observable<{
+      id: string;
+      result: number;
+    }>;
+  }
+
+  async onApplicationShutdown() {
+    await this.worker.terminate();
+  }
+
+  run(n: number): Promise<number> {
+    const uniqueId = randomUUID();
+    this.worker.postMessage({ n, id: uniqueId });
+
+    return firstValueFrom(
+      this.message$.pipe(
+        filter(({ id }) => id === uniqueId), // Match response to request
+        map(({ result }) => result),
+      ),
+    );
+  }
+}
+```
+
+> **Note on `message$` naming:**
+> The `$` suffix follows **Finnish Notation**, an industry convention signifying that the variable holds an RxJS `Observable` stream rather than a plain static value.
+
+---
+
+### Approach 2: Thread Pool with `piscina` (Production Best Practice)
+
+Creating a new thread on every request is expensive. **Piscina** provides a worker thread pool that manages idle/active threads automatically and resolves tasks via native Promises.
+
+#### 1. Worker Function ([`src/fibonacci/fibonacci.worker.ts`](/src/fibonacci/fibonacci.worker.ts)):
+
+```typescript
+function fib(n: number): number {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+export default (n: number) => fib(n);
+```
+
+#### 2. Controller using Piscina ([`src/fibonacci/fibonacci.controller.ts`](/src/fibonacci/fibonacci.controller.ts)):
+```typescript
+import { Controller, Get, Query } from '@nestjs/common';
+import { resolve } from 'path';
+import { Piscina } from 'piscina'; // Named import in Piscina v4/v5
+
+@Controller('fibonacci')
+export class FibonacciController {
+  fibonacciWorker = new Piscina({
+    filename: resolve(import.meta.dirname, 'fibonacci.worker.js'),
+  });
+
+  @Get()
+  fibonacci(@Query('n') n = 10) {
+    return this.fibonacciWorker.run(+n);
+  }
+}
+```
+
+---
+
+### Testing CPU-Bound Endpoints
+
+- **Calculate Fibonacci without blocking the Event Loop:**
+  ```powershell
+  curl.exe -X GET -w "\nTime total: %{time_total}s\n" "localhost:3000/fibonacci/?n=41"
+  ```
+- While this calculation runs (~1.4s), background tasks like [`CronService`](/src/cron/cron.service.ts) continue executing every 2 seconds without stutter or delay.
+
+---
+
+### Architectural Decision Guide: When to Use What?
+
+| Scenario | Recommended Approach | Why? |
+| :--- | :--- | :--- |
+| **Infrequent / One-off CPU task** (e.g. monthly ledger report, batch data migration) | **Native `new Worker()`** | Threads are spun up on-demand and destroyed with `worker.terminate()`, releasing OS memory immediately without keeping idle threads alive. |
+| **High-throughput API with short CPU tasks** (e.g. image resizing, hashing, parsing JSON/XML) | **Thread Pool (`Piscina`)** | Reuses a fixed pool of worker threads matched to CPU core count. Eliminates the ~50ms and 30-50MB overhead of spawning a thread per request. |
+| **Long-running background jobs** (minutes to hours: video encoding, massive web scraping) | **Job Queues (BullMQ / Redis)** | Heavy multi-minute jobs should NOT run inside the web server process at all. Dedicated queue workers isolate crashes, allow automatic retries, and distribute workloads across server clusters. |
