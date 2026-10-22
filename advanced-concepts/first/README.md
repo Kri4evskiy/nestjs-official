@@ -674,3 +674,197 @@ update(
 | **Composition Limit** | Limited to 1 parent class | Unlimited combinations (`MixinC(MixinB(MixinA(Base)))`) |
 | **Coupling** | High tight-coupling to parent modifications | Modular, isolated, plug-and-play behavior |
 | **DI Integration** | Difficult to parameterize constructors dynamically | Can dynamically decorate classes with `@Injectable()` and custom `@Inject()` tokens |
+
+---
+
+## Lesson: Custom Schematics & AST Transformations
+
+### Overview
+
+**Schematics** are template-based, platform-independent code generators originally built by the Angular team and adopted by NestJS CLI (`@nestjs/schematics`). Rather than operating directly on the physical filesystem with destructive writes, Schematics operate on a **Virtual Staging Tree** in memory:
+1. Validations, merges, and transformations are staged.
+2. Supports non-destructive previews via `--dry-run`.
+3. Changes commit to disk atomically only if all steps succeed.
+
+In this lesson, we constructed a custom schematic named `configurable-module` that:
+- Executes the official `@nestjs/schematics:module` generator to scaffold a module and register it in `app.module.ts`.
+- Copies and interpolates template files (`*.module-definition.ts`).
+- Uses **TypeScript Compiler AST (Abstract Syntax Tree)** APIs to automatically modify the generated module class to `extends ConfigurableModuleClass` and insert the required import statement.
+
+---
+
+### Project Setup & Configuration
+
+1. In the root `tsconfig.build.json`, exclude the schematics workspace so the application build doesn't attempt to compile schematic assets:
+   ```json
+   "exclude": ["node_modules", "test", "dist", "**/*spec.ts", "schematics"]
+   ```
+
+2. Collection Definition ([`schematics/src/collection.json`](/schematics/src/collection.json)):
+   ```json
+   {
+     "$schema": "../node_modules/@angular-devkit/schematics/collection-schema.json",
+     "schematics": {
+       "configurable-module": {
+         "description": "Generates a configurable module.",
+         "factory": "./configurable-module/index#generate",
+         "schema": "./configurable-module/schema.json"
+       }
+     }
+   }
+   ```
+
+3. CLI Schema Options ([`schematics/src/configurable-module/schema.json`](/schematics/src/configurable-module/schema.json)):
+   ```json
+   {
+     "$schema": "http://json-schema.org/schema",
+     "$id": "configurable-module",
+     "type": "object",
+     "properties": {
+       "name": {
+         "type": "string",
+         "description": "The name of the module.",
+         "$default": {
+           "$source": "argv",
+           "index": 0
+         },
+         "x-prompt": "What name would you like to use for the module?"
+       }
+     },
+     "required": ["name"]
+   }
+   ```
+
+4. File Template ([`schematics/src/configurable-module/files/__name@dasherize__/__name@dasherize__.module-definition.ts`](/schematics/src/configurable-module/files/__name@dasherize__/__name@dasherize__.module-definition.ts)):
+   ```typescript
+   import { ConfigurableModuleBuilder } from '@nestjs/common';
+
+   export const { ConfigurableModuleClass } =
+     new ConfigurableModuleBuilder().build();
+   ```
+
+---
+
+### Implementation with AST Manipulation ([`schematics/src/configurable-module/index.ts`](/schematics/src/configurable-module/index.ts)):
+
+```typescript
+import { dasherize } from '@angular-devkit/core/src/utils/strings';
+import {
+  apply,
+  chain,
+  externalSchematic,
+  mergeWith,
+  move,
+  Rule,
+  SchematicContext,
+  strings,
+  template,
+  Tree,
+  url,
+} from '@angular-devkit/schematics';
+import * as ts from 'typescript';
+import { findNodes, insertImport } from '@schematics/angular/utility/ast-utils';
+import { InsertChange } from '@schematics/angular/utility/change';
+
+interface ConfigurableModuleSchematicOptions {
+  name: string;
+}
+
+function updateModuleFile(
+  tree: Tree,
+  options: ConfigurableModuleSchematicOptions,
+): Tree {
+  const name = dasherize(options.name);
+  const moduleFilePath = `src/${name}/${name}.module.ts`;
+  const moduleFileContent = tree.readText(moduleFilePath);
+  
+  // 1. Parse existing module file into TypeScript AST
+  const source = ts.createSourceFile(
+    moduleFilePath,
+    moduleFileContent,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  
+  const updateRecorder = tree.beginUpdate(moduleFilePath);
+
+  // 2. Insert import statement via AST helper
+  const insertImportChange = insertImport(
+    source,
+    moduleFilePath,
+    'ConfigurableModuleClass',
+    `./${name}.module-definition.js`,
+  );
+  if (insertImportChange instanceof InsertChange) {
+    updateRecorder.insertRight(
+      insertImportChange.pos,
+      insertImportChange.toAdd,
+    );
+  }
+
+  // 3. Find ClassDeclaration node and inject "extends ConfigurableModuleClass"
+  const classNode = findNodes(source, ts.SyntaxKind.ClassDeclaration)[0];
+  updateRecorder.insertRight(
+    classNode.end - 2,
+    'extends ConfigurableModuleClass ',
+  );
+
+  tree.commitUpdate(updateRecorder);
+  return tree;
+}
+
+export function generate(options: ConfigurableModuleSchematicOptions): Rule {
+  return (_tree: Tree, _context: SchematicContext) => {
+    const templateSource = apply(url('./files'), [
+      template({ ...options, ...strings }),
+      move('src'),
+    ]);
+
+    return chain([
+      // A. Delegate initial module scaffolding to official NestJS schematic
+      externalSchematic('@nestjs/schematics', 'module', {
+        name: options.name,
+      }),
+      // B. Merge our template (*.module-definition.ts)
+      mergeWith(templateSource),
+      // C. Perform AST modification on the newly created module file
+      (tree) => updateModuleFile(tree, options),
+    ]);
+  };
+}
+```
+
+---
+
+### Build & Execution Commands
+
+#### 1. Compile Schematics (TypeScript to JavaScript)
+Schematics execute in Node.js runtime and **must be built** before execution:
+```powershell
+# From the /schematics subdirectory:
+npm run build
+# OR watch mode during development:
+npm run build -- --watch
+```
+
+#### 2. Dry-Run Preview (Testing without disk changes)
+```powershell
+# Run from project root:
+npx @angular-devkit/schematics-cli ./schematics:configurable-module recipes --dry-run
+```
+
+#### 3. Real Execution (Writing files to disk)
+
+> [!NOTE]
+> When executing local schematic collections specified with relative paths (`./schematics`), `@angular-devkit/schematics-cli` enables `debug` and `dry-run` modes by default. To persist changes to disk, explicitly disable both:
+
+```powershell
+# Directly using Schematics CLI:
+npx @angular-devkit/schematics-cli ./schematics:configurable-module recipes --no-debug --no-dry-run
+
+# Or linking locally to run seamlessly via Nest CLI:
+cd schematics && npm link && cd ..
+npm link schematics
+nest g schematics:configurable-module recipes
+```
+
