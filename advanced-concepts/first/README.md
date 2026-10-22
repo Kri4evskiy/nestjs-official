@@ -555,3 +555,122 @@ export class AppModule {}
 | **`forRoot`** | Only in `AppModule` | **Once** per project | Global configuration (DB connection, core config) |
 | **`forFeature`** | In feature modules | **Multiple** times | Registers feature-specific entities to the global root (repositories, queues) |
 | **`register`** | In any module | **As needed** | Independent instance with its own configuration (HTTP client, JWT) |
+
+---
+
+## Lesson: Composition with Mixins
+
+### Core Concepts
+
+In TypeScript and JavaScript, a class can only inherit from a single parent class (`extends Base`). Multiple inheritance is not supported directly. The **Mixin Pattern** solves this limitation by relying on **composition of behaviors** instead of rigid inheritance hierarchies.
+
+A **Mixin** is a higher-order function that takes a base class as an argument and returns a newly constructed, anonymous subclass extending that base with extra properties, methods, or metadata.
+
+```text
+Base Class  ──>  [ Mixin A ]  ──>  [ Mixin B ]  ──>  Enhanced Composed Class
+```
+
+---
+
+### Use Case 1: Entity Behavior Composition (`WithUuid`)
+
+When multiple entities or classes need identical behavioral slices (e.g., auto-generated UUIDs, timestamps, audit fields) without forcing them into an unnatural single inheritance tree.
+
+#### Mixin Definition ([`src/common/mixins/with-uuid.mixin/with-uuid.mixin.ts`](/src/common/mixins/with-uuid.mixin/with-uuid.mixin.ts)):
+
+```typescript
+import { Type } from '@nestjs/common';
+import { randomUUID } from 'crypto';
+
+export function WithUuid<TBase extends Type>(Base: TBase) {
+  return class extends Base {
+    uuid = randomUUID();
+
+    regenerateUuid() {
+      this.uuid = randomUUID();
+    }
+  };
+}
+```
+
+#### Applying to an Entity ([`src/coffees/entities/coffee.entity.ts`](/src/coffees/entities/coffee.entity.ts)):
+
+```typescript
+import { WithUuid } from '../../common/mixins/with-uuid.mixin/with-uuid.mixin.js';
+
+export class Coffee {
+  constructor(public name: string) {}
+}
+
+const CoffeeWithUuid = WithUuid(Coffee);
+const coffee = new CoffeeWithUuid('Buddy Brew');
+// coffee.name  --> 'Buddy Brew'
+// coffee.uuid  --> 'c28a54d6-8b2d-...'
+// coffee.regenerateUuid()
+```
+
+---
+
+### Use Case 2: Dynamic NestJS Providers & Pipes (`EntityExistsPipe`)
+
+In REST APIs (`PATCH /:id`, `DELETE /:id`, `GET /:id`), checking whether a record exists before executing controller logic is critical to prevent unhandled database errors or non-standard 500s.
+
+Instead of writing repetitive pipes (`CoffeeExistsPipe`, `UserExistsPipe`, `OrderExistsPipe`), a mixin creates a **parameterized Pipe class** tailored to any given entity repository on demand.
+
+#### Generic Pipe Factory ([`src/common/pipes/entity-exists/entity-exists.pipe.ts`](/src/common/pipes/entity-exists/entity-exists.pipe.ts)):
+
+```typescript
+import {
+  ArgumentMetadata,
+  Inject,
+  Injectable,
+  PipeTransform,
+  Type,
+} from '@nestjs/common';
+
+export function EntityExistsPipe(entityCls: Type): Type<PipeTransform> {
+  @Injectable()
+  class EntityExistsPipeCls implements PipeTransform {
+    constructor(
+      @Inject(entityCls)
+      private entityRepository: { exists(condition: unknown): Promise<void> },
+    ) {}
+
+    async transform(value: any, metadata: ArgumentMetadata) {
+      // In a real ORM setup (e.g. TypeORM / MikroORM), throws NotFoundException if record does not exist
+      await this.entityRepository.exists({ where: { id: value } });
+      return value;
+    }
+  }
+
+  return EntityExistsPipeCls;
+}
+```
+
+#### Usage in Controllers ([`src/coffees/coffees.controller.ts`](/src/coffees/coffees.controller.ts)):
+
+```typescript
+@Patch(':id')
+update(
+  @Param('id', EntityExistsPipe(Coffee)) id: string,
+  @Body() updateCoffeeDto: UpdateCoffeeDto,
+) {
+  return this.coffeesService.update(+id, updateCoffeeDto);
+}
+```
+
+> **How NestJS DI resolves it:**
+> 1. `EntityExistsPipe(Coffee)` executes at route definition time and returns the newly minted `EntityExistsPipeCls` class constructor.
+> 2. NestJS instantiates the pipe through its IoC container, resolving the dependency injected via `@Inject(Coffee)`.
+> 3. During request execution, `transform()` runs **before** the controller handler. If the entity doesn't exist, an exception halts the execution pipeline immediately.
+
+---
+
+### Comparison: Inheritance vs. Mixins
+
+| Feature | Single Inheritance (`extends`) | Mixins (Higher-Order Functions) |
+| :--- | :--- | :--- |
+| **Hierarchy** | Strict "is-a" relationship (e.g., `Dog is an Animal`) | Flexible "can-do / has-a" traits (e.g., `Class with Uuid`) |
+| **Composition Limit** | Limited to 1 parent class | Unlimited combinations (`MixinC(MixinB(MixinA(Base)))`) |
+| **Coupling** | High tight-coupling to parent modifications | Modular, isolated, plug-and-play behavior |
+| **DI Integration** | Difficult to parameterize constructors dynamically | Can dynamically decorate classes with `@Injectable()` and custom `@Inject()` tokens |

@@ -13,6 +13,8 @@ import { CoffeesService } from './coffees.service.js';
 import { CreateCoffeeDto } from './dto/create-coffee.dto.js';
 import { UpdateCoffeeDto } from './dto/update-coffee.dto.js';
 import { CircuitBreakerInterceptor } from '../common/interceptors/circuit-breaker/circuit-breaker.interceptor.js';
+import { EntityExistsPipe } from '../common/pipes/entity-exists/entity-exists.pipe.js';
+import { Coffee } from './entities/coffee.entity.js';
 
 @Controller('coffees')
 export class CoffeesController {
@@ -35,7 +37,11 @@ export class CoffeesController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateCoffeeDto: UpdateCoffeeDto) {
+  update(
+    // @Param('id') id: string,
+    @Param('id', EntityExistsPipe(Coffee)) id: string, // 👈 example of using the new Pipe (comment out next line)
+    @Body() updateCoffeeDto: UpdateCoffeeDto,
+  ) {
     return this.coffeesService.update(+id, updateCoffeeDto);
   }
 
