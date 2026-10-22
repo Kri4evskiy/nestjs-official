@@ -461,3 +461,97 @@ Only the first 3 requests execute `findAll()` (reaching `FAILURE_THRESHOLD = 3`)
 | **Rate Limiting / Throttling** | Caps the maximum number of requests a client can make in a given timeframe (e.g. `@nestjs/throttler`). | Protecting endpoints from brute-force, scraping, or client-side retry floods. |
 | **Bulkhead Pattern** | Partitions critical resources (thread pools, DB connection pools) into isolated compartments. | Ensuring a failure in an auxiliary feature (like PDF rendering) cannot exhaust DB connections needed for checkout. |
 | **Strict Timeouts** | Aborts outgoing HTTP or DB operations that exceed a defined threshold (e.g. 2–5 seconds). | Preventing hanging sockets from exhausting Node.js memory. |
+
+---
+
+## Lesson: Building Configurable Modules (`ConfigurableModuleBuilder`)
+
+Creating dynamic modules with `.register()` / `.registerAsync()` / `.forRoot()` / `.forRootAsync()` used to require 100+ lines of manual boilerplate (custom tokens, factory interfaces, async option types). The `ConfigurableModuleBuilder` generates all of this automatically.
+
+---
+
+### Module Definition ([`src/http-client/http-client.module-definition.ts`](/src/http-client/http-client.module-definition.ts)):
+
+```typescript
+import { ConfigurableModuleBuilder } from '@nestjs/common';
+
+export const {
+  ConfigurableModuleClass,
+  MODULE_OPTIONS_TOKEN: HTTP_MODULE_OPTIONS,
+  OPTIONS_TYPE,
+  ASYNC_OPTIONS_TYPE,
+} = new ConfigurableModuleBuilder<{ baseUrl?: string }>({ alwaysTransient: true })
+  .setExtras<{ isGlobal?: boolean }>(
+    { isGlobal: true },
+    (definition, extras) => ({
+      ...definition,
+      global: extras.isGlobal,
+    }),
+  )
+  .build();
+```
+
+**What the builder generates:**
+- `ConfigurableModuleClass`: Base class with ready-made `register()` and `registerAsync()` static methods.
+- `HTTP_MODULE_OPTIONS` (renamed from `MODULE_OPTIONS_TOKEN`): DI token to inject the passed options into any provider.
+- `OPTIONS_TYPE` / `ASYNC_OPTIONS_TYPE`: TypeScript helper types for strict typing of sync/async options.
+
+**Builder Configuration Options:**
+- `.setClassMethodName('forRoot')`: Renames `register` → `forRoot` and `registerAsync` → `forRootAsync`.
+- `.setExtras(...)`: Adds extra properties (like `isGlobal`) that are handled separately from the module options.
+- `{ alwaysTransient: true }`: Each `register()` call creates an independent module instance (useful when different feature modules need different configurations).
+
+---
+
+### Module Class ([`src/http-client/http-client.module.ts`](/src/http-client/http-client.module.ts)):
+
+```typescript
+@Module({})
+export class HttpClientModule extends ConfigurableModuleClass {
+  constructor(@Inject(HTTP_MODULE_OPTIONS) private options: typeof OPTIONS_TYPE) {
+    console.log(options);
+    super();
+  }
+
+  // Override to add custom logic (validation, extra providers, logging)
+  static register(options: typeof OPTIONS_TYPE): DynamicModule {
+    return {
+      ...super.register(options),
+    };
+  }
+
+  static registerAsync(options: typeof ASYNC_OPTIONS_TYPE): DynamicModule {
+    return {
+      ...super.registerAsync(options),
+    };
+  }
+}
+```
+
+---
+
+### Usage in AppModule ([`src/app.module.ts`](/src/app.module.ts)):
+
+```typescript
+@Module({
+  imports: [
+    // Synchronous:
+    HttpClientModule.register({ baseUrl: 'http://nestjs.com' }),
+    // Asynchronous (from ConfigService / .env):
+    // HttpClientModule.registerAsync({
+    //   useFactory: () => ({ baseUrl: 'http://nestjs.com' }),
+    // }),
+  ],
+})
+export class AppModule {}
+```
+
+---
+
+### Naming Conventions for Dynamic Module Methods
+
+| Method | Where? | How many times? | Purpose |
+| :--- | :--- | :--- | :--- |
+| **`forRoot`** | Only in `AppModule` | **Once** per project | Global configuration (DB connection, core config) |
+| **`forFeature`** | In feature modules | **Multiple** times | Registers feature-specific entities to the global root (repositories, queues) |
+| **`register`** | In any module | **As needed** | Independent instance with its own configuration (HTTP client, JWT) |
