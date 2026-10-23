@@ -8,6 +8,7 @@ import { FibonacciModule } from './fibonacci/fibonacci.module.js';
 import { CircuitBreakerInterceptor } from './common/interceptors/circuit-breaker/circuit-breaker.interceptor.js';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { HttpClientModule } from './http-client/http-client.module.js';
+import { TagsModule } from './tags/tags.module.js';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { HttpClientModule } from './http-client/http-client.module.js';
     CronModule,
     FibonacciModule,
     HttpClientModule.register({ baseUrl: 'http://nestjs.com' }),
+    TagsModule,
     // ⚠️  Alternatively:
     // HttpClientModule.registerAsync({
     //   useFactory: () => ({ baseUrl: 'http://nestjs.com' }),
