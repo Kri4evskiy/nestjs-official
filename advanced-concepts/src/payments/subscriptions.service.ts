@@ -16,5 +16,9 @@ export class SubscriptionsService {
     );
 
     console.log('Cancelling subscription', eventContext.request.url);
+
+    // 💡 Real-world usage: consuming getters from EventContext
+    // console.log(`Cancelling subscription for provider: ${eventContext.provider}`);
+    // console.log(`Verified webhook signature: ${eventContext.signature}`);
   }
 }

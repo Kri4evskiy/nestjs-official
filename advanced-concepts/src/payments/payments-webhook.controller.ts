@@ -22,4 +22,15 @@ export class PaymentsWebhookController {
       new PaymentFailedEvent(paymentId, { contextId }),
     );
   }
+
+  // 💡 Real-world production webhook pattern:
+  // @Post()
+  // @HttpCode(HttpStatus.OK)
+  // async handleWebhook(@Req() request: Request, @Body() body: any) {
+  //   const contextId = ContextIdFactory.create();
+  //   this.moduleRef.registerRequestByContextId(request, contextId);
+  //   this.eventEmitter.emit(PaymentFailedEvent.key, new PaymentFailedEvent(body.paymentId, { contextId }));
+  //   return { received: true }; // Fast acknowledge for Stripe/PayPal
+  // }
 }
+

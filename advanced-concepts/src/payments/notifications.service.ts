@@ -16,5 +16,12 @@ export class NotificationsService {
     );
 
     console.log('Sending a payment notification', eventContext.request.url);
+
+    // 💡 Real-world usage: consuming getters from EventContext
+    // console.log(`Payment failed via provider: ${eventContext.provider}`);
+    // console.log(`Origin client IP: ${eventContext.clientIp}`);
+    // if (eventContext.provider === 'stripe') {
+    //   // e.g. send email with Stripe portal link
+    // }
   }
 }
