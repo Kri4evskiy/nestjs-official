@@ -15,6 +15,7 @@ export class PaymentsWebhookController {
   webhook(@Req() request: Request) {
     const contextId = ContextIdFactory.create();
     const paymentId = Math.floor(Math.random() * 1000);
+
     this.moduleRef.registerRequestByContextId(request, contextId);
 
     this.eventEmitter.emit(
@@ -33,4 +34,3 @@ export class PaymentsWebhookController {
   //   return { received: true }; // Fast acknowledge for Stripe/PayPal
   // }
 }
-
