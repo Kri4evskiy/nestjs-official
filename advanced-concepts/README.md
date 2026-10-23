@@ -447,7 +447,7 @@ Simulating 50 rapid requests against a failing endpoint:
   for i in `seq 1 50`; do curl -w "\n" "http://localhost:3000/coffees"; done
   ```
 
-**Observed Result:**  
+**Observed Result:**
 Only the first 3 requests execute `findAll()` (reaching `FAILURE_THRESHOLD = 3`). The remaining 47 requests are instantly rejected by the circuit breaker in `Open` state without invoking the controller method.
 
 ---
@@ -777,7 +777,7 @@ function updateModuleFile(
   const name = dasherize(options.name);
   const moduleFilePath = `src/${name}/${name}.module.ts`;
   const moduleFileContent = tree.readText(moduleFilePath);
-  
+
   // 1. Parse existing module file into TypeScript AST
   const source = ts.createSourceFile(
     moduleFilePath,
@@ -785,7 +785,7 @@ function updateModuleFile(
     ts.ScriptTarget.Latest,
     true,
   );
-  
+
   const updateRecorder = tree.beginUpdate(moduleFilePath);
 
   // 2. Insert import statement via AST helper
@@ -867,4 +867,230 @@ cd schematics && npm link && cd ..
 npm link schematics
 nest g schematics:configurable-module recipes
 ```
+
+---
+
+## Lesson: Dependency Injection (DI) Sub-trees & Context Isolation
+
+### Overview & The "Scope Infection" Problem
+
+By default, providers in NestJS are **Singletons** (`Scope.DEFAULT`): instantiated once at boot and shared across the entire application.
+
+When providers require per-request data (such as tenant IDs, request URLs, auth tokens), we often mark them as `Scope.REQUEST`. However, **Request Scope bubbles up the dependency tree**:
+- If Service B is `Scope.REQUEST`, any Service A that injects B automatically becomes `Scope.REQUEST`.
+- Any Controller injecting Service A also becomes `Scope.REQUEST`.
+- Under high throughput (e.g., thousands of RPS), reconstructing full dependency chains on every incoming HTTP call introduces substantial garbage-collection and memory pressure.
+
+**DI Sub-trees** allow applications to isolate request-scoped state into targeted, transient sub-graphs while keeping upstream controllers, services, and event listeners as lightweight **Singletons**.
+
+```mermaid
+graph TD
+  subgraph Singleton Realm
+    Ctrl[PaymentsWebhookController]
+    Notif[NotificationsService]
+    Sub[SubscriptionsService]
+  end
+
+  subgraph DI Sub-tree (ContextId: #42)
+    ReqData[(Registered Request Object)]
+    Ctx[EventContext - Scope.REQUEST]
+  end
+
+  Ctrl -- "1. ContextIdFactory.create()" --> ContextID[ContextId #42]
+  Ctrl -- "2. registerRequestByContextId(req, #42)" --> ReqData
+  Ctrl -- "3. emit(event, meta: { contextId: #42 })" --> Bus[EventEmitter2]
+
+  Bus --> Notif
+  Bus --> Sub
+
+  Notif -- "moduleRef.resolve(EventContext, #42)" --> Ctx
+  Sub -- "moduleRef.resolve(EventContext, #42)" --> Ctx
+  ReqData -. "Injected via @Inject(REQUEST)" .-> Ctx
+```
+
+---
+
+### Key Primitives
+
+1. **`ContextId`**: A unique token representing an isolated dependency sub-tree instance.
+2. **`ContextIdFactory.create()`**: Generates a new unique `ContextId` on demand (even outside standard HTTP cycles, e.g., in queues or events).
+3. **`moduleRef.registerRequestByContextId(request, contextId)`**: Associates a mock, custom payload or real HTTP `request` object with the given `ContextId` under the `@Inject(REQUEST)` DI token.
+4. **`moduleRef.resolve(TargetProvider, contextId)`**:
+   - Asynchronously creates or retrieves the instance of `TargetProvider` bound to that specific `ContextId`.
+   - If called multiple times with the **same** `ContextId`, it returns the **exact same instance** (cached per sub-tree).
+   - If called without a `contextId`, it generates a completely detached, disposable instance.
+
+---
+
+### Implementation Example: Event-Driven Payment Webhooks
+
+#### 1. Request-Scoped Context ([`src/payments/context/event-context.ts`](/src/payments/context/event-context.ts)):
+
+```typescript
+import { Inject, Injectable, Scope } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import type { Request } from 'express';
+
+@Injectable({ scope: Scope.REQUEST })
+export class EventContext {
+  constructor(@Inject(REQUEST) public readonly request: Request) {}
+}
+```
+
+#### 2. Event Payload Carrying Context ([`src/payments/events/payment-failed.event.ts`](/src/payments/events/payment-failed.event.ts)):
+
+```typescript
+import { ContextId } from '@nestjs/core';
+
+export class PaymentFailedEvent {
+  static readonly key = 'PAYMENT_FAILED';
+
+  constructor(
+    public readonly paymentId: number,
+    public readonly meta: { contextId: ContextId },
+  ) {}
+}
+```
+
+#### 3. Controller Spawning Sub-tree ([`src/payments/payments-webhook.controller.ts`](/src/payments/payments-webhook.controller.ts)):
+
+```typescript
+@Controller('payments-webhook')
+export class PaymentsWebhookController {
+  constructor(
+    private readonly eventEmitter: EventEmitter2,
+    private readonly moduleRef: ModuleRef,
+  ) {}
+
+  @Get()
+  webhook(@Req() request: Request) {
+    const contextId = ContextIdFactory.create();
+    const paymentId = Math.floor(Math.random() * 1000);
+
+    // Bind current request to the generated contextId
+    this.moduleRef.registerRequestByContextId(request, contextId);
+
+    // Broadcast event with contextId attached
+    this.eventEmitter.emit(
+      PaymentFailedEvent.key,
+      new PaymentFailedEvent(paymentId, { contextId }),
+    );
+  }
+}
+```
+
+#### 4. Decoupled Listeners Sharing the Sub-tree:
+
+**[`src/payments/notifications.service.ts`](/src/payments/notifications.service.ts)**:
+```typescript
+@Injectable()
+export class NotificationsService {
+  constructor(private readonly moduleRef: ModuleRef) {}
+
+  @OnEvent(PaymentFailedEvent.key)
+  async sendPaymentNotification(event: PaymentFailedEvent) {
+    const eventContext = await this.moduleRef.resolve(
+      EventContext,
+      event.meta.contextId, // Resolves or reuses shared instance
+    );
+
+    console.log('Sending a payment notification', eventContext.request.url);
+  }
+}
+```
+
+**[`src/payments/subscriptions.service.ts`](/src/payments/subscriptions.service.ts)**:
+```typescript
+@Injectable()
+export class SubscriptionsService {
+  constructor(private readonly moduleRef: ModuleRef) {}
+
+  @OnEvent(PaymentFailedEvent.key)
+  async cancelSubscription(event: PaymentFailedEvent) {
+    const eventContext = await this.moduleRef.resolve(
+      EventContext,
+      event.meta.contextId, // Shared instance identical to NotificationsService!
+    );
+
+    console.log('Cancelling subscription', eventContext.request.url);
+  }
+}
+```
+
+---
+
+### Real-World Context Enrichment (Signatures & Multi-Provider Webhooks)
+
+In production setups (e.g., handling Stripe, PayPal, or multiple webhook sources simultaneously), the `EventContext` wrapper serves as a strongly-typed adapter exposing convenient getters instead of forcing listeners to inspect raw `request.headers`:
+
+```typescript
+@Injectable({ scope: Scope.REQUEST })
+export class EventContext {
+  constructor(@Inject(REQUEST) public readonly request: Request) {}
+
+  // Automatically detects webhook origin based on provider headers
+  get provider(): 'stripe' | 'paypal' | 'unknown' {
+    if (this.request.headers['stripe-signature']) return 'stripe';
+    if (this.request.headers['paypal-transmission-sig']) return 'paypal';
+    return 'unknown';
+  }
+
+  // Unified signature extractor for security/HMAC verification
+  get signature(): string | undefined {
+    return (this.request.headers['stripe-signature'] ||
+      this.request.headers['paypal-transmission-sig']) as string | undefined;
+  }
+
+  get clientIp(): string {
+    return (this.request.headers['x-forwarded-for'] as string) || this.request.ip || '';
+  }
+}
+```
+
+#### Consumer Usage in Singleton Services:
+
+```typescript
+@Injectable()
+export class NotificationsService {
+  constructor(private readonly moduleRef: ModuleRef) {}
+
+  @OnEvent(PaymentFailedEvent.key)
+  async sendPaymentNotification(event: PaymentFailedEvent) {
+    const ctx = await this.moduleRef.resolve(EventContext, event.meta.contextId);
+
+    console.log(`Payment failed via: ${ctx.provider}`);
+    console.log(`Verified signature: ${ctx.signature}`);
+    console.log(`Client IP: ${ctx.clientIp}`);
+  }
+}
+```
+
+#### Production Webhook Controller (POST & Fast Acknowledge):
+
+```typescript
+@Controller('payments-webhook')
+export class PaymentsWebhookController {
+  constructor(
+    private readonly eventEmitter: EventEmitter2,
+    private readonly moduleRef: ModuleRef,
+  ) {}
+
+  @Post()
+  @HttpCode(HttpStatus.OK)
+  async handleWebhook(@Req() request: Request, @Body() body: any) {
+    const contextId = ContextIdFactory.create();
+    this.moduleRef.registerRequestByContextId(request, contextId);
+
+    // Broadcast decoupled event to all handlers via Sub-tree
+    this.eventEmitter.emit(
+      PaymentFailedEvent.key,
+      new PaymentFailedEvent(body.paymentId, { contextId }),
+    );
+
+    // Fast 200 acknowledge to prevent webhook retries by Stripe/PayPal
+    return { received: true };
+  }
+}
+```
+
 
