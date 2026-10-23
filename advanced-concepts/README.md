@@ -464,6 +464,15 @@ Only the first 3 requests execute `findAll()` (reaching `FAILURE_THRESHOLD = 3`)
 
 ---
 
+### In Real World: Production Circuit Breakers (`opossum`)
+
+While building a custom state machine in an Interceptor is great for understanding the mechanics under the hood, writing and maintaining your own distributed circuit breaker in production can be error-prone (handling sliding error percentage windows, volume thresholds, Prometheus metrics, and distributed fallbacks).
+
+In real-world enterprise Node.js & NestJS applications, the standard, battle-tested third-party library is **[`opossum`](https://www.npmjs.com/package/opossum)** (originally created by Red Hat):
+
+
+---
+
 ## Lesson: Building Configurable Modules (`ConfigurableModuleBuilder`)
 
 Creating dynamic modules with `.register()` / `.registerAsync()` / `.forRoot()` / `.forRootAsync()` used to require 100+ lines of manual boilerplate (custom tokens, factory interfaces, async option types). The `ConfigurableModuleBuilder` generates all of this automatically.
@@ -1092,5 +1101,3 @@ export class PaymentsWebhookController {
   }
 }
 ```
-
-
