@@ -9,15 +9,19 @@ import { CircuitBreakerInterceptor } from './common/interceptors/circuit-breaker
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { HttpClientModule } from './http-client/http-client.module.js';
 import { TagsModule } from './tags/tags.module.js';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { PaymentsModule } from './payments/payments.module.js';
 
 @Module({
   imports: [
+    EventEmitterModule.forRoot(),
     CoffeesModule,
     SchedulerModule,
     CronModule,
     FibonacciModule,
     HttpClientModule.register({ baseUrl: 'http://nestjs.com' }),
     TagsModule,
+    PaymentsModule,
     // ⚠️  Alternatively:
     // HttpClientModule.registerAsync({
     //   useFactory: () => ({ baseUrl: 'http://nestjs.com' }),
