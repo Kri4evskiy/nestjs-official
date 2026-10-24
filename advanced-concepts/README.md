@@ -1101,3 +1101,143 @@ export class PaymentsWebhookController {
   }
 }
 ```
+
+---
+
+## Lesson: Durable Providers in-depth
+
+### Core Concepts & The Scaling Problem
+
+In standard request-scoped setups (`Scope.REQUEST`), NestJS reconstructs the entire dependency sub-tree on **every single incoming HTTP request**.
+
+In SaaS Multi-Tenant architectures or high-throughput localized portals:
+- Tens of thousands of requests may arrive from the **same tenant** (e.g., `Company A`) within seconds.
+- Recreating tenant-specific database connection pools, repositories, or translators on each individual request causes extreme CPU spikes and Garbage Collection thrashing.
+
+**Durable Providers** solve this by combining the isolation of `Scope.REQUEST` with the persistence of `Scope.DEFAULT`:
+- Configured via `@Injectable({ scope: Scope.REQUEST, durable: true })`.
+- Instructs NestJS to **cache and reuse** the instantiated sub-tree across requests as long as they share the same tenant/context identifier.
+
+```text
+Request 1 (Tenant A) ───┐
+Request 2 (Tenant A) ───┼──> [ Tenant A Durable Sub-tree ] (Instantiated ONCE)
+Request 3 (Tenant A) ───┘
+
+Request 4 (Tenant B) ──────> [ Tenant B Durable Sub-tree ] (Instantiated ONCE)
+```
+
+---
+
+### Part 1: Multi-Tenancy with Custom ContextIdStrategy
+
+#### 1. Durable Provider Definition ([`src/data-source/data-source.service.ts`](/src/data-source/data-source.service.ts)):
+
+```typescript
+import { Inject, Injectable, Scope } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+
+@Injectable({ scope: Scope.REQUEST, durable: true })
+export class DataSourceService {
+  constructor(@Inject(REQUEST) private request: unknown) {}
+}
+```
+
+#### 2. Dependent Service Demonstrating Lifecycle ([`src/users/users.service.ts`](/src/users/users.service.ts)):
+
+```typescript
+@Injectable()
+export class UsersService {
+  constructor(private readonly dataSourceService: DataSourceService) {
+    // Logged only when a new instance is constructed for a tenant
+    console.log(this);
+  }
+}
+```
+
+#### 3. Custom Context ID Strategy ([`src/core/aggregate-by-tenant.strategy.ts`](/src/core/aggregate-by-tenant.strategy.ts)):
+
+Implements `ContextIdStrategy` to route requests to tenant-specific sub-trees using an in-memory TTL map:
+
+```typescript
+import {
+  ContextId,
+  ContextIdFactory,
+  ContextIdResolver,
+  ContextIdResolverFn,
+  ContextIdStrategy,
+  HostComponentInfo,
+} from '@nestjs/core';
+import { Request } from 'express';
+
+export class AggregateByTenantContextIdStrategy implements ContextIdStrategy {
+  private readonly tenants = new Map<string, ContextId>();
+
+  attach(
+    contextId: ContextId,
+    request: Request,
+  ): ContextIdResolverFn | ContextIdResolver {
+    const tenantId = request.headers['x-tenant-id'] as string;
+    if (!tenantId) {
+      return () => contextId; // Fallback to standard request context
+    }
+
+    let tenantSubTreeId: ContextId;
+    if (this.tenants.has(tenantId)) {
+      // Reuse existing tenant sub-tree
+      tenantSubTreeId = this.tenants.get(tenantId) as ContextId;
+    } else {
+      // First visit: create sub-tree and set a 3-second cache TTL
+      tenantSubTreeId = ContextIdFactory.create();
+      this.tenants.set(tenantId, tenantSubTreeId);
+      setTimeout(() => this.tenants.delete(tenantId), 3000);
+    }
+
+    return {
+      payload: { tenantId },
+      resolve: (info: HostComponentInfo) =>
+        info.isTreeDurable ? tenantSubTreeId : contextId,
+    };
+  }
+}
+```
+
+#### 4. Global Strategy Registration ([`src/main.ts`](/src/main.ts)):
+
+Must be registered before application bootstrap so the strategy intercepts all inbound contexts from the very first request:
+
+```typescript
+import { ContextIdFactory, NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module.js';
+import { AggregateByTenantContextIdStrategy } from './core/aggregate-by-tenant.strategy.js';
+
+// Apply strategy globally before bootstrap
+ContextIdFactory.apply(new AggregateByTenantContextIdStrategy());
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  await app.listen(process.env.PORT ?? 3000);
+}
+await bootstrap();
+```
+
+---
+
+### Verifying Durable Provider Behavior
+
+- **Consecutive requests within TTL (Same Tenant):**
+  ```powershell
+  curl.exe -H "x-tenant-id: 1" localhost:3000/users
+  curl.exe -H "x-tenant-id: 1" localhost:3000/users
+  curl.exe -H "x-tenant-id: 1" localhost:3000/users
+  ```
+  `console.log(this)` prints **only once**, proving the instance was cached and reused.
+
+- **Request for a Different Tenant:**
+  ```powershell
+  curl.exe -H "x-tenant-id: 2" localhost:3000/users
+  ```
+  `console.log(this)` prints again, creating a dedicated sub-tree for Tenant 2.
+
+- **Request after TTL (after 3000ms):**
+  The entry is pruned from the map, triggering fresh instantiation on subsequent requests.
+
