@@ -13,6 +13,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { PaymentsModule } from './payments/payments.module.js';
 import { DataSourceModule } from './data-source/data-source.module.js';
 import { UsersModule } from './users/users.module.js';
+import { I18nModule } from './i18n/i18n.module.js';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { UsersModule } from './users/users.module.js';
     PaymentsModule,
     DataSourceModule,
     UsersModule,
+    I18nModule,
     // ⚠️  Alternatively:
     // HttpClientModule.registerAsync({
     //   useFactory: () => ({ baseUrl: 'http://nestjs.com' }),

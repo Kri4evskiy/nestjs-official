@@ -1,0 +1,6 @@
+{
+  "HELLO": "Привіт {firstName}",
+  "ERRORS": {
+    "USER_NOT_FOUND": "Користувач {firstName} не знайдений"
+  }
+}
