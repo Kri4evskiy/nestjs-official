@@ -1241,3 +1241,161 @@ await bootstrap();
 - **Request after TTL (after 3000ms):**
   The entry is pruned from the map, triggering fresh instantiation on subsequent requests.
 
+---
+
+### Part 2: Internationalization (i18n) & Type-Safe Locales
+
+Parsing localization JSON translation dictionaries on every single request is CPU-intensive. By combining `durable: true` with locale-based context aggregation, translation files are cached in memory **per language sub-tree** (`en`, `ua`), while maintaining strict TypeScript type-safety for nested keys.
+
+#### 1. Configuration for JSON Modules
+
+- In [`tsconfig.json`](/tsconfig.json):
+  ```json
+  "compilerOptions": {
+    "resolveJsonModule": true
+  }
+  ```
+
+#### 2. Type-Safe I18n Service ([`src/i18n/i18n.service.ts`](/src/i18n/i18n.service.ts)):
+
+Uses recursive conditional types (`Join<PathsToStringProps<Schema>>`) to validate dot-notated paths (e.g., `'ERRORS.USER_NOT_FOUND'`) against the JSON structure at compile time:
+
+```typescript
+import { Inject, Injectable, Scope } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import format from 'string-format';
+import en from '../assets/locales/en.json' with { type: 'json' };
+import ua from '../assets/locales/ua.json' with { type: 'json' };
+
+type Schema = typeof en;
+
+type PathsToStringProps<T> = T extends string
+  ? []
+  : {
+      [K in Extract<keyof T, string>]: [K, ...PathsToStringProps<T[K]>];
+    }[Extract<keyof T, string>];
+
+type Join<T extends string[]> = T extends []
+  ? never
+  : T extends [infer F]
+    ? F
+    : T extends [infer F, ...infer R]
+      ? F extends string
+        ? `${F}.${Join<Extract<R, string[]>>}`
+        : never
+      : string;
+
+@Injectable({ scope: Scope.REQUEST, durable: true })
+export class I18nService {
+  public static readonly defaultLanguage = 'en';
+  public static readonly supportedLanguages = ['en', 'ua'];
+  private readonly locales: Record<string, Schema> = { en, ua };
+
+  constructor(
+    @Inject(REQUEST) private readonly payload: { localeCode: string },
+  ) {}
+
+  translate(
+    key: Join<PathsToStringProps<Schema>>,
+    ...args: Array<string | Record<string, unknown>>
+  ): string {
+    const locale =
+      this.locales[this.payload.localeCode ?? I18nService.defaultLanguage];
+
+    // Traverses nested object path e.g. "ERRORS.USER_NOT_FOUND"
+    const text: string = key
+      .split('.')
+      .reduce((o: any, i) => o?.[i], locale) as unknown as string;
+
+    return format(text, ...args);
+  }
+}
+```
+
+#### 3. Locale Context Strategy ([`src/core/aggregate-by-locale.strategy.ts`](/src/core/aggregate-by-locale.strategy.ts)):
+
+Uses `accept-language-parser` to parse client preference and route to cached locale sub-trees:
+
+```typescript
+import {
+  ContextId,
+  ContextIdFactory,
+  ContextIdResolver,
+  ContextIdResolverFn,
+  ContextIdStrategy,
+  HostComponentInfo,
+} from '@nestjs/core';
+import { pick } from 'accept-language-parser';
+import { Request } from 'express';
+import { I18nService } from '../i18n/i18n.service.js';
+
+export class AggregateByLocaleContextIdStrategy implements ContextIdStrategy {
+  private readonly locales = new Map<string, ContextId>();
+
+  attach(
+    contextId: ContextId,
+    request: Request,
+  ): ContextIdResolverFn | ContextIdResolver {
+    const localeCode =
+      pick(
+        I18nService.supportedLanguages,
+        request.headers['accept-language'] ?? I18nService.defaultLanguage,
+      ) ?? I18nService.defaultLanguage;
+
+    let localeSubTreeId: ContextId;
+    if (this.locales.has(localeCode)) {
+      localeSubTreeId = this.locales.get(localeCode) as ContextId;
+    } else {
+      localeSubTreeId = ContextIdFactory.create();
+      this.locales.set(localeCode, localeSubTreeId);
+      setTimeout(() => this.locales.delete(localeCode), 3000);
+    }
+
+    return {
+      payload: { localeCode },
+      resolve: (info: HostComponentInfo) =>
+        info.isTreeDurable ? localeSubTreeId : contextId,
+    };
+  }
+}
+```
+
+#### 4. Usage in Consumer Service ([`src/app.service.ts`](/src/app.service.ts)):
+
+```typescript
+@Injectable()
+export class AppService {
+  constructor(private readonly i18nService: I18nService) {}
+
+  getHello(): string {
+    return this.i18nService.translate('ERRORS.USER_NOT_FOUND', {
+      firstName: 'Kamil',
+    });
+  }
+}
+```
+
+#### 5. Verification Commands:
+
+- **Default English Translation:**
+  ```powershell
+  curl.exe localhost:3000
+  # Output: User Kamil does not exist
+  ```
+
+- **Ukrainian Translation via Accept-Language Header:**
+  ```powershell
+  curl.exe -H "accept-language: ua" localhost:3000
+  # Output: Користувач Kamil не знайдений
+  ```
+
+---
+
+> [!TIP]
+> **Production Best Practice Note:**
+> In production enterprise applications, writing a custom i18n engine from scratch is rarely necessary. The standard, battle-tested community library is **[`nestjs-i18n`](https://github.com/toonvanstrijp/nestjs-i18n)**.
+> It implements the exact same sub-tree isolation under the hood, but provides out-of-the-box support for:
+> - Multiple language resolvers (Headers, Query parameters `?lang=ua`, Cookies, or JWT claims).
+> - Automatic CLI-based type generation (`i18n-generated.ts`).
+> - Complex pluralization rules across different language families.
+> - Seamless integration with `class-validator` for automated DTO validation message translation.
